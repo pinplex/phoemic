@@ -5,6 +5,8 @@ using Flux.Data: DataLoader
 using Plots
 using LaTeXStrings
 using DiffEqFlux
+using Interpolations
+using ForwardDiff
 
 #%% parameters
 # constants
@@ -38,16 +40,37 @@ NPP_ref = 60 # PgC / yr
 β = 0.4 # CO2 fertilization parameterization
 σ = 0.015 # parameter for Henry's law
 η = 10 * Ca_ref / Co_ref # ocean C uptake saturation
-λ = 1.05 # climate feedback parameter
+λ = 0.85 # climate feedback parameter
 τ = 41 # yr, land residence time
 Q10 = 1.8
+
+#%% initial conditions:
+u0 = [0, 0, 0, 0, T_ref, Cl_ref, Co_ref, Ca_ref] # Hp, Ho, H, T, To, Cl, Co, Ca
+len = 140
+tspan = (1.0,Float64(len))
+
+#%% make forcing timeline
+c = 280
+forcing = Array{Float64}(undef, len+1) #or Float64 or Any instead of Int64
+for i in 1:len+1
+    c = c * 1.01
+    forcing[i]= c
+end
+
+forcing = forcing .- 280
+forcing = diff(forcing)
+xs = range(1, length=len)
+g = LinearInterpolation(xs, forcing)
+
+#%% prepare parameeter container
+p = [α, β, σ, η, λ, γ, τ, Q10, g]
 
 #%% define mechanistic model
 function climate_carbon_cycle(du, u, p, t)
   Hp, Ho, H, To, T, Cl, Co, Ca = u # state variables
-  α, β, σ, η, λ, γ, τ, Q10 = p # parameters
+  α, β, σ, η, λ, γ, τ, Q10, g = p # parameters
 
-  CO2 = Ca * PgC_to_ppm # convert atmospheric carbon to atm. CO2 concentration
+  CO2 = Ca * PgC_to_ppm # convert atmospheric carbon to atm. CO2 concentration + add forcing
   F = α*log(CO2/CO2_ref) # radiative forcing based on atm. CO2 concentration
   ΔT = T - T_ref # change in temperature
 
@@ -61,17 +84,11 @@ function climate_carbon_cycle(du, u, p, t)
   ## carbon
   du[6] = dCl = NPP_ref*(1 + β*log(CO2/CO2_ref)) - Cl/τ*Q10^(ΔT/10) # land carbon
   du[7] = dCo = σ*((Ca - Ca_ref) - η*(Co - Co_ref)) # ocean carbon
-  du[8] = dCa = - dCl - dCo # atmos carbon
+  du[8] = dCa = - dCl - dCo + g[t]/PgC_to_ppm # atmos carbon
 
 end
 
 # %% solve the problem
-# initial conditions: + 10 K
-u0 = [0, 0, 0, 0, T_ref+10, Cl_ref, Co_ref, Ca_ref] # Hp, Ho, H, T, To, Cl, Co, Ca
-len = 3000
-tspan = (1.0,Float64(len))
-p = [α, β, σ, η, λ, γ, τ, Q10]
-
 # run solver
 prob = ODEProblem(climate_carbon_cycle, u0, tspan, p)
 sol = solve(prob, Tsit5(), saveat=1)
