@@ -65,7 +65,7 @@ xs = range(1, length=len)
 g = LinearInterpolation(xs, forcing)
 
 #%% prepare parameeter container
-p = [α, β, σ, η, λ, γ, τ, Q10, g]
+pt = [α, β, σ, η, λ, γ, τ, Q10, g]
 
 #%% define mechanistic model
 function climate_carbon_cycle(du, u, p, t)
@@ -92,7 +92,7 @@ end
 
 # %% solve the problem
 # run solver
-prob_true = ODEProblem(climate_carbon_cycle, u0, tspan, p)
+prob_true = ODEProblem(climate_carbon_cycle, u0, tspan, pt)
 sol_true = solve(prob_true, Tsit5(), saveat=1)
 
 #%% make plot
@@ -110,8 +110,8 @@ p_init = Float64.(initial_params(NN))
 #%% define hybrid model
 function climate_carbon_cycle_hybrid(du, u, p, t)
   Hp, Ho, H, To, T, Cl, Co, Ca = u # state variables
-  #mp, np = p
-  #α, β, σ, η, λ, γ, τ, Q10, g = mp # parameters + forcing
+  
+  λ = p[end]
 
   CO2 = Ca * PgC_to_ppm # convert atmospheric carbon to atm. CO2 concentration + add forcing
   F = α*log(CO2/CO2_ref) # radiative forcing based on atm. CO2 concentration
@@ -126,16 +126,18 @@ function climate_carbon_cycle_hybrid(du, u, p, t)
 
   ## carbon
   #du[6] = dCl = NPP_ref*(1 + β*log(CO2/CO2_ref)) - Cl/τ*Q10^(ΔT/10) # land carbon
-  du[6] = dCl = NN([CO2/CO2_ref, ΔT/T_ref, Cl/Cl_ref], p)[1] # land carbon neural
+  du[6] = dCl = NN([CO2/CO2_ref, ΔT/T_ref, Cl/Cl_ref], p[1:length(p_init)])[1] # land carbon neural
   du[7] = dCo = σ*((Ca - Ca_ref) - η*(Co - Co_ref)) # ocean carbon
   du[8] = dCa = - dCl - dCo + g[t] # atmos carbon
 
 end
 
+#%% prepare parameters
+p = [p_init; 1.0]
+
 #%% solve the hybrid problem
-prob_hybrid = ODEProblem(climate_carbon_cycle_hybrid, u0, tspan, p_init)
-sensealg = InterpolatingAdjoint(autojacvec=ReverseDiffVJP(false))
-sol_hybrid = solve(prob_hybrid, TRBDF2(autodiff=false), p=p_init, saveat=1, sensealg = sensealg)
+prob_hybrid = ODEProblem(climate_carbon_cycle_hybrid, u0, tspan, p)
+sol_hybrid = solve(prob_hybrid, Tsit5(), p=p, saveat=1)
 
 #%% make plot before training
 pl = plot(sol_true, layout=(4,2), label="true",
@@ -145,7 +147,7 @@ plot!(pl,sol_hybrid, layout=(4,2), label="prediction")
 plot!(pl, size=(750,1000))
 
 #%% set up training
-#opt = ADAM(0.1)
+#opt = ADAM(0.01)
 opt = BFGS(initial_stepnorm = 0.1)
 t = range(tspan[1],tspan[2],length=len)
 
@@ -153,21 +155,16 @@ function predict_true()
   Array(solve(prob_true, Tsit5(), saveat=1))
 end
 
-ode_data = predict_true()
+true_data = predict_true()
 
 function predict_hybrid(p)
-  Array(solve(prob_hybrid, Tsit5(), p=p, saveat=t, sensealg = sensealg))
-end
-
-function predict(θ)
-  temp_hybridprob = remake(prob_hybrid;p=θ,saveat=1)
-  Array(solve(temp_hybridprob, RK4();reltol=1e-8,abstol=1e-8,sensealg = InterpolatingAdjoint(autojacvec=ReverseDiffVJP())))
+  Array(solve(prob_hybrid, Tsit5(), p=p, saveat=t))
 end
 
 function loss_mse(p)
-    pdata = predict(p)
-    tdata = ode_data #predict_true()
-    loss = Flux.mse(pdata[2,:],tdata[2,:]) # ocean
+    pdata = predict_hybrid(p)
+    tdata = true_data #predict_true()
+    loss = Flux.mse([pdata[1,:];pdata[8,:]],[tdata[1,:];tdata[8,:]])
     loss
 end
 
@@ -179,15 +176,15 @@ callback(θ,l) = begin
   end
   false
 end
-loss_mse(p_init)
+loss_mse(p)
 
 #%%
-oopz = DiffEqFlux.sciml_train(loss_mse, p_init, opt,
-                              maxiters= 30, cb = callback,
-                              allow_f_increases = true)
+#p = [res.minimizer[1:length(p_init)]; 0.5]
+res = DiffEqFlux.sciml_train(loss_mse, p, opt,
+                              maxiters= 30, cb = callback)
 
 #%% make plot after training
-sol_hybrid = solve(prob_hybrid, Tsit5(), p=oopz.minimizer, saveat=t, sensealg = sensealg)
+sol_hybrid = solve(prob_hybrid, Tsit5(), p=res.minimizer, saveat=t)
 
 pl = plot(sol_true, layout=(4,2), label="true",
           ylabel=[L"W m^{-2}" L"W m^{-2}" L"W m^{-2}" "K" "K" "Pg C" "Pg C" "Pg C"],
@@ -196,20 +193,19 @@ plot!(pl,sol_hybrid, layout=(4,2), label="prediction")
 plot!(pl, size=(750,1000))
 
 #%% test extrapolation
-p_new = oopz.minimizer
+p_new = res.minimizer
 
-# different init conditions#%% initial conditions:
-u0b = [0, 0, 0, 0, T_ref+10, Cl_ref, Co_ref, Ca_ref] # Hp, Ho, H, T, To, Cl, Co, Ca
+# different init conditions
+u0b = [0, 0, 0, 0, T_ref+10, Cl_ref, Co_ref, Ca_ref*2] # Hp, Ho, H, T, To, Cl, Co, Ca
 
 # true solution
 # run solver
-prob_true = ODEProblem(climate_carbon_cycle, u0b, tspan, p)
-sol_true = solve(prob_true, Tsit5(), saveat=1)
+prob_true = ODEProblem(climate_carbon_cycle, u0b, tspan, pt)
+sol_true = solve(prob_true, Tsit5(), p=pt, saveat=1)
 
 # hybrid problem with trained network
 prob_hybrid = ODEProblem(climate_carbon_cycle_hybrid, u0b, tspan, p_new)
-sensealg = InterpolatingAdjoint(autojacvec=ReverseDiffVJP(false))
-sol_hybrid = solve(prob_hybrid, TRBDF2(autodiff=false), p=p_new, saveat=1, sensealg = sensealg)
+sol_hybrid = solve(prob_hybrid, Tsit5(), p=p_new, saveat=1)
 
 #%% make plot before training
 pl = plot(sol_true, layout=(4,2), label="true",
