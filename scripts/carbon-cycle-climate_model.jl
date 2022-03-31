@@ -9,6 +9,11 @@ using Interpolations
 using ForwardDiff
 using Optim
 using DiffEqSensitivity
+using CSV
+using DataFrames
+
+#%% define global variables
+home = pwd()
 
 #%% parameters
 # constants
@@ -51,26 +56,32 @@ u0 = [0, 0, 0, 0, T_ref, Cl_ref, Co_ref, Ca_ref] # Hp, Ho, H, T, To, Cl, Co, Ca
 len = 140
 tspan = (1.0,Float64(len))
 
-#%% make forcing timeline
-c = 280
-forcing = Array{Float64}(undef, len+1) #or Float64 or Any instead of Int64
-for i in 1:len+1
-    c = c * 1.01
-    forcing[i]= c
-end
-
-forcing = forcing .- 280 # calc delta
-forcing = diff(forcing) ./ PgC_to_ppm # calc flux in PgC
+#%% forcing data from LR_1pctCO2
+#= n = 140
+conc = 280 # ppm
+k = Array{Float64}(undef, n) #or Float64 or Any instead of Int64
+for i in 1:n
+    conc = conc * 1.01
+    k[i] = conc 
+end =#
+#%% read data
 xs = range(1, length=len)
-g = LinearInterpolation(xs, forcing)
+df = DataFrame(CSV.File(home*"/data/carbon-budget_MPI-ESM1-2-LR_1pctCO2_1850-2014.csv"))
+dCo_data = LinearInterpolation(xs, df[!, "fgco2"][2:len+1])
+dCa_data = LinearInterpolation(xs, df[!, "co2_inPgC"][2:len+1])
+dCl_data = LinearInterpolation(xs, df[!, "netAtmosLandCO2Flux"][2:len+1])
+#Iem = df[!, "dC_ocean"] + df[!, "dC_land"] + df[!, "dC_atmos"] # emission
+#Iem_data = LinearInterpolation(xs, Iem[2:len+1])
+#%%
+Iem_data = LinearInterpolation(xs, df[!, "emission"][2:len+1])
 
 #%% prepare parameeter container
-pt = [α, β, σ, η, λ, γ, τ, Q10, g]
+pt = [α, β, σ, η, λ, γ, τ, Q10]
 
 #%% define mechanistic model
 function climate_carbon_cycle(du, u, p, t)
   Hp, Ho, H, To, T, Cl, Co, Ca = u # state variables
-  α, β, σ, η, λ, γ, τ, Q10, g = p # parameters + forcing
+  α, β, σ, η, λ, γ, τ, Q10 = p # parameters + forcing
 
   CO2 = Ca * PgC_to_ppm # convert atmospheric carbon to atm. CO2 concentration + add forcing
   F = α*log(CO2/CO2_ref) # radiative forcing based on atm. CO2 concentration
@@ -84,9 +95,9 @@ function climate_carbon_cycle(du, u, p, t)
   du[5] = dT = dH / C  # surface air temperature
 
   ## carbon
-  du[6] = dCl = NPP_ref*(1 + β*log(CO2/CO2_ref)) - Cl/τ*Q10^(ΔT/10) # land carbon
-  du[7] = dCo = σ*((Ca - Ca_ref) - η*(Co - Co_ref)) # ocean carbon
-  du[8] = dCa = - dCl - dCo + g[t] # atmos carbon
+  du[6] = dCl = dCl_data[t] # NPP_ref*(1 + β*log(CO2/CO2_ref)) - Cl/τ*Q10^(ΔT/10) # land carbon
+  du[7] = dCo = dCo_data[t] # ocean carbon σ*((Ca - Ca_ref) - η*(Co - Co_ref))
+  du[8] = dCa = - dCl - dCo + Iem_data[t] # atmos carbon
 
 end
 
@@ -100,18 +111,12 @@ pl = plot(sol_true, layout=(4,2), label="",
           ylabel=[L"W m^{-2}" L"W m^{-2}" L"W m^{-2}" "K" "K" "Pg C" "Pg C" "Pg C"],
           title=["E_planet" "E_ocean" "E_atmos" "T_ocean" "T_atmos" "C_land" "C_ocean" "C_atmos" ])
 plot!(pl, size=(750,1000))
-#savefig("../plots/carbon+two-layer-ebm/Case00_plus-2xCO2.pdf")
-
-#%% define neural model
-# set up NN and init parameters
-NN = FastChain(FastDense(3, 32, tanh), FastDense(32, 32, tanh), FastDense(32,1))
-p_init = Float64.(initial_params(NN))
+savefig("plots/carbon+two-layer-ebm/Case00_with-1pctCO2-forcing.pdf")
 
 #%% define hybrid model
 function climate_carbon_cycle_hybrid(du, u, p, t)
   Hp, Ho, H, To, T, Cl, Co, Ca = u # state variables
-  
-  λ = p[end]
+  λ, β, Q10 = p # parameter to learn
 
   CO2 = Ca * PgC_to_ppm # convert atmospheric carbon to atm. CO2 concentration + add forcing
   F = α*log(CO2/CO2_ref) # radiative forcing based on atm. CO2 concentration
@@ -125,15 +130,14 @@ function climate_carbon_cycle_hybrid(du, u, p, t)
   du[5] = dT = dH / C  # surface air temperature
 
   ## carbon
-  #du[6] = dCl = NPP_ref*(1 + β*log(CO2/CO2_ref)) - Cl/τ*Q10^(ΔT/10) # land carbon
-  du[6] = dCl = NN([CO2/CO2_ref, ΔT/T_ref, Cl/Cl_ref], p[1:length(p_init)])[1] # land carbon neural
-  du[7] = dCo = σ*((Ca - Ca_ref) - η*(Co - Co_ref)) # ocean carbon
-  du[8] = dCa = - dCl - dCo + g[t] # atmos carbon
+  du[6] = dCl = NPP_ref*(1 + β*log(CO2/CO2_ref)) - Cl/τ*Q10^(ΔT/10) # land carbon dCl_data[t]
+  du[7] = dCo = dCo_data[t] # ocean carbon σ*((Ca - Ca_ref) - η*(Co - Co_ref))
+  du[8] = dCa = - dCl - dCo + Iem_data[t] # atmos carbon
 
 end
 
 #%% prepare parameters
-p = [p_init; 1.0]
+p = [1.0, 1.0, 1.0]
 
 #%% solve the hybrid problem
 prob_hybrid = ODEProblem(climate_carbon_cycle_hybrid, u0, tspan, p)
@@ -145,17 +149,19 @@ pl = plot(sol_true, layout=(4,2), label="true",
           title=["E_planet" "E_ocean" "E_atmos" "T_ocean" "T_atmos" "C_land" "C_ocean" "C_atmos" ])
 plot!(pl,sol_hybrid, layout=(4,2), label="prediction")      
 plot!(pl, size=(750,1000))
+savefig("plots/carbon+two-layer-ebm/Case01_lambda-beta-Q10_with-1pctCO2-forcing.pdf")
 
 #%% set up training
-#opt = ADAM(0.01)
-opt = BFGS(initial_stepnorm = 0.1)
+opt = ADAM(0.01)
+#opt = BFGS(initial_stepnorm = 0.1)
 t = range(tspan[1],tspan[2],length=len)
 
 function predict_true()
   Array(solve(prob_true, Tsit5(), saveat=1))
 end
 
-true_data = predict_true()
+true_data = [predict_true()[1,:],
+            Ca_ref .+ cumsum(df[!, "co2_inPgC"][2:len+1])]
 
 function predict_hybrid(p)
   Array(solve(prob_hybrid, Tsit5(), p=p, saveat=t))
@@ -164,91 +170,22 @@ end
 function loss_mse(p)
     pdata = predict_hybrid(p)
     tdata = true_data #predict_true()
-    loss = Flux.mse([pdata[1,:];pdata[8,:]],[tdata[1,:];tdata[8,:]])
+    loss = Flux.mse([pdata[1,:];pdata[8,:]],[tdata[1,:][1];tdata[2,:][1]])
+    #loss = Flux.mse(pdata[8,:],tdata)
+
     loss
 end
 
 losses = []
 callback(θ,l) = begin
   push!(losses, l)
-  if length(losses)%1==0
+  if length(losses)%10==0
       println("Current loss after $(length(losses)) iterations: $(losses[end])")
   end
   false
 end
 loss_mse(p)
 
-#%%
-#p = [res.minimizer[1:length(p_init)]; 0.5]
-res = DiffEqFlux.sciml_train(loss_mse, p, opt,
-                              maxiters= 30, cb = callback)
-
-#%% make plot after training
-sol_hybrid = solve(prob_hybrid, Tsit5(), p=res.minimizer, saveat=t)
-
-pl = plot(sol_true, layout=(4,2), label="true",
-          ylabel=[L"W m^{-2}" L"W m^{-2}" L"W m^{-2}" "K" "K" "Pg C" "Pg C" "Pg C"],
-          title=["E_planet" "E_ocean" "E_atmos" "T_ocean" "T_atmos" "C_land" "C_ocean" "C_atmos" ])
-plot!(pl,sol_hybrid, layout=(4,2), label="prediction")      
-plot!(pl, size=(750,1000))
-
-#%% test extrapolation
-p_new = res.minimizer
-
-# different init conditions
-u0b = [0, 0, 0, 0, T_ref+10, Cl_ref, Co_ref, Ca_ref*2] # Hp, Ho, H, T, To, Cl, Co, Ca
-
-# true solution
-# run solver
-prob_true = ODEProblem(climate_carbon_cycle, u0b, tspan, pt)
-sol_true = solve(prob_true, Tsit5(), p=pt, saveat=1)
-
-# hybrid problem with trained network
-prob_hybrid = ODEProblem(climate_carbon_cycle_hybrid, u0b, tspan, p_new)
-sol_hybrid = solve(prob_hybrid, Tsit5(), p=p_new, saveat=1)
-
-#%% make plot before training
-pl = plot(sol_true, layout=(4,2), label="true",
-          ylabel=[L"W m^{-2}" L"W m^{-2}" L"W m^{-2}" "K" "K" "Pg C" "Pg C" "Pg C"],
-          title=["E_planet" "E_ocean" "E_atmos" "T_ocean" "T_atmos" "C_land" "C_ocean" "C_atmos" ])
-plot!(pl,sol_hybrid, layout=(4,2), label="prediction")      
-plot!(pl, size=(750,1000))
-
-#%%
-# #%% solve the hybrid problem
-# p2 = (p, p_init)
-# prob_hybrid = ODEProblem(climate_carbon_cycle_hybrid, u0, tspan, p=p2)
-# sol_hybrid = solve(prob_hybrid, Tsit5(), p=p2, saveat=1)
-
-# #%% make plot with untrained net
-# pl = plot(sol_hybrid, layout=(4,2), label="",
-#           ylabel=[L"W m^{-2}" L"W m^{-2}" L"W m^{-2}" "K" "K" "Pg C" "Pg C" "Pg C"],
-#           title=["E_planet" "E_ocean" "E_atmos" "T_ocean" "T_atmos" "C_land" "C_ocean" "C_atmos" ])
-# plot!(pl, size=(750,1000))
-
-# #%% set up training
-# #opt = ADAM(0.01)
-# opt = BFGS(initial_stepnorm = 0.1)
-# t = range(tspan[1],tspan[2],length=len)
-
-# #%%
-# function predict_true()
-#   Array(solve(prob_true, Tsit5(), saveat=1))
-# end
-# tdata = predict_true()
-
-# function predict_hybrid()
-#   Array(solve(prob_hybrid, Tsit5(), p=p2, saveat=1))
-# end
-
-# function loss_mse()
-#     pdata = predict_hybrid()
-#     tdata = predict_true()
-#     loss = Flux.Losses.mse(tdata[8,:], pdata[8,:]) # atmosphere
-#     #loss
-# end
-
-# #%%
 # cb = function (;doplot=false) #callback function to observe training
 #   pdata = predict_hybrid()
 #   display(loss_mse())
@@ -262,8 +199,174 @@ plot!(pl, size=(750,1000))
 #   return false
 # end
 
-# #%% train
-# #data = Iterators.repeated((), 100)
-# #Flux.train!(loss_mass_balance, ps, data, opt, cb = cb)
-# #Flux.train!(loss_mse, p2, data, opt, cb = cb)
-# res = DiffEqFlux.sciml_train(loss_mse, p2, opt, maxiters = 1)
+#%%
+#p = [res.minimizer[1:length(p_init)]; 0.5]
+res = DiffEqFlux.sciml_train(loss_mse, p, opt, maxiters= 1500, cb = callback)
+
+#%% make plot after training
+sol_hybrid_new = solve(prob_hybrid, Tsit5(), p=res.minimizer, saveat=t)
+
+pl = plot(sol_true, layout=(4,2), label="true",
+          ylabel=[L"W m^{-2}" L"W m^{-2}" L"W m^{-2}" "K" "K" "Pg C" "Pg C" "Pg C"],
+          title=["E_planet" "E_ocean" "E_atmos" "T_ocean" "T_atmos" "C_land" "C_ocean" "C_atmos" ])
+plot!(pl,sol_hybrid_new, layout=(4,2), label="prediction")      
+plot!(pl, size=(750,1000))
+savefig("plots/carbon+two-layer-ebm/Case01_lambda-beta-Q10_with-1pctCO2-forcing-after-training.pdf")
+
+#%% test extrapolation
+p_new = res.minimizer
+
+# different init conditions
+u0_02 = [0, 0, 0, 0, T_ref+5, Cl_ref, Co_ref, Ca_ref] # Hp, Ho, H, T, To, Cl, Co, Ca
+
+# true solution
+# run solver
+prob_true_02 = ODEProblem(climate_carbon_cycle, u0_02, tspan, pt)
+sol_true_02 = solve(prob_true_02, Tsit5(), p=pt, saveat=1)
+
+# hybrid problem with trained network
+prob_hybrid_02 = ODEProblem(climate_carbon_cycle_hybrid, u0_02, tspan, p_new)
+sol_hybrid_02 = solve(prob_hybrid_02, Tsit5(), p=p_new, saveat=1)
+
+#%% make plot before training
+pl = plot(sol_true_02, layout=(4,2), label="true",
+          ylabel=[L"W m^{-2}" L"W m^{-2}" L"W m^{-2}" "K" "K" "Pg C" "Pg C" "Pg C"],
+          title=["E_planet" "E_ocean" "E_atmos" "T_ocean" "T_atmos" "C_land" "C_ocean" "C_atmos" ])
+plot!(pl,sol_hybrid_02, layout=(4,2), label="prediction")      
+plot!(pl, size=(750,1000))
+
+#### Use NN in the hybrid model
+#%% define neural model
+# set up NN
+#NN = FastChain(FastDense(3, 32, tanh), FastDense(32, 32, tanh), FastDense(32,1))
+NN = FastChain(FastDense(2, 32, tanh), FastDense(32, 32, tanh), FastDense(32,1))
+p_random = Float32.(initial_params(NN))
+p = p_random
+#NN([1,2,3],p_random)
+NN([1,2],p_random)
+
+#%% define hybrid model with neural network
+function climate_carbon_cycle_hybrid_NN(du, u, p, t)
+  Hp, Ho, H, To, T, Cl, Co, Ca = u # state variables
+  #λ, β, Q10 = p # parameter to learn
+
+  CO2 = Ca * PgC_to_ppm # convert atmospheric carbon to atm. CO2 concentration + add forcing
+  F = α*log(CO2/CO2_ref) # radiative forcing based on atm. CO2 concentration
+  ΔT = T - T_ref # change in temperature
+
+  ## energy
+  du[1] = dHp = -(λ * ΔT) + F # planetary energy uptake (accum. imbalance)
+  du[2] = dHo = γ*(ΔT - To) # deep-ocean energy uptake
+  du[3] = dH = dHp - dHo # atmosphere/land/upper-ocean energy uptake
+  du[4] = dTo = dHo / Co  # deep-ocean water temperature
+  du[5] = dT = dH / C  # surface air temperature
+
+  ## carbon
+  #du[6] = dCl = NN([CO2/CO2_ref,T/T_ref,Cl/Cl_ref],p)[1]
+  du[6] = dCl = NPP_ref*(1 + β*log(CO2/CO2_ref)) - NN([T/T_ref,Cl/Cl_ref],p)[1] # land carbon dCl_data[t]
+  #du[6] = dCl = NPP_ref*(1 + β*log(CO2/CO2_ref)) - Cl/τ*Q10^(ΔT/10) # land carbon dCl_data[t]
+  du[7] = dCo = dCo_data[t] # ocean carbon σ*((Ca - Ca_ref) - η*(Co - Co_ref))
+  du[8] = dCa = - dCl - dCo + Iem_data[t] # atmos carbon
+
+end
+
+#%% solve the hybrid problem
+prob_hybrid = ODEProblem(climate_carbon_cycle_hybrid_NN, u0, tspan, p)
+sensealg = InterpolatingAdjoint(autojacvec=ReverseDiffVJP(false))
+sol_hybrid = solve(prob_hybrid, TRBDF2(autodiff=false), p=p, saveat=1, sensealg = sensealg)
+
+#%% make plot
+pl = plot(sol_true, layout=(4,2), label="true",
+          ylabel=[L"W m^{-2}" L"W m^{-2}" L"W m^{-2}" "K" "K" "Pg C" "Pg C" "Pg C"],
+          title=["E_planet" "E_ocean" "E_atmos" "T_ocean" "T_atmos" "C_land" "C_ocean" "C_atmos" ])
+plot!(pl,sol_hybrid, layout=(4,2), label="prediction")      
+plot!(pl, size=(750,1000))
+savefig("plots/carbon+two-layer-ebm/Case02_Reco-as-NN_with-1pctCO2-forcing.pdf")
+
+#savefig("Case02_learn-R_init.pdf")
+#%% set up training
+#opt = BFGS(initial_stepnorm = 0.1)
+opt = ADAM(0.01)
+t = range(tspan[1],tspan[2],length=len)
+
+function predict_true()
+  Array(solve(prob_true, Tsit5(), saveat=1))
+end
+
+true_data = [predict_true()[1,:],
+            Ca_ref .+ cumsum(df[!, "co2_inPgC"][2:len+1])]
+
+function predict_hybrid(p)
+  Array(solve(prob_hybrid, Tsit5(), p=p, saveat=t, sensealg = sensealg))
+end
+
+function loss_mse(p)
+    pdata = predict_hybrid(p)
+    tdata = true_data #predict_true()
+    loss = Flux.mse([pdata[1,:];pdata[8,:]],[tdata[1,:][1];tdata[2,:][1]])
+    #loss = Flux.mse(pdata[8,:],tdata)
+
+    loss
+end
+
+function predict(θ)
+  temp_hybridprob = remake(prob_hybrid;p=θ,saveat=1)
+  Array(solve(temp_hybridprob, RK4();reltol=1e-8,abstol=1e-8,sensealg = InterpolatingAdjoint(autojacvec=ReverseDiffVJP())))
+end
+
+losses = []
+callback(θ,l) = begin
+  push!(losses, l)
+  if length(losses)%10==0
+      println("Current loss after $(length(losses)) iterations: $(losses[end])")
+  end
+  false
+end
+loss_mse(p)
+
+#%% train
+#data = Iterators.repeated((), 1000)
+#Flux.train!(loss_mass_balance, ps, data, opt, cb = cb)
+#Flux.train!(loss_mse, ps, data, opt)
+
+#%%
+oopz = DiffEqFlux.sciml_train(loss_mse, p_random, opt,
+                              maxiters = 100, cb = callback,
+                              allow_f_increases = true)
+
+#%% make plot after training
+sol_hybrid_new = solve(prob_hybrid, Tsit5(), p=oopz.u, saveat=t)
+
+# make plot after training
+pl = plot(sol_true, layout=(4,2), label="true",
+          ylabel=[L"W m^{-2}" L"W m^{-2}" L"W m^{-2}" "K" "K" "Pg C" "Pg C" "Pg C"],
+          title=["E_planet" "E_ocean" "E_atmos" "T_ocean" "T_atmos" "C_land" "C_ocean" "C_atmos" ])
+plot!(pl,sol_hybrid_new, layout=(4,2), label="prediction")      
+plot!(pl, size=(750,1000))
+savefig("plots/carbon+two-layer-ebm/Case02_Reco-as-NN_with-1pctCO2-forcing-after-training.pdf")
+
+
+#%% test extrapolation
+p_new = oopz.u
+
+# different init conditions
+u0_03 = [0, 0, 0, 0, T_ref, Cl_ref, Co_ref, Ca_ref] # Hp, Ho, H, To, T, Cl, Co, Ca
+
+Iem_data = zero(Iem_data) .+ 10
+Iem_data = LinearInterpolation(xs, Iem_data)
+
+# run solver
+prob_true = ODEProblem(climate_carbon_cycle, u0_03, tspan, pt)
+sol_true = solve(prob_true, Tsit5(), p=pt, saveat=1)
+
+# solve the hybrid problem
+prob_hybrid = ODEProblem(climate_carbon_cycle_hybrid_NN, u0_03, tspan, p_new)
+sensealg = InterpolatingAdjoint(autojacvec=ReverseDiffVJP(false))
+sol_hybrid = solve(prob_hybrid, TRBDF2(autodiff=false), p=p_new, saveat=1, sensealg = sensealg)
+
+# make plot
+pl = plot(sol_true, layout=(4,2), label="true",
+          ylabel=[L"W m^{-2}" L"W m^{-2}" L"W m^{-2}" "K" "K" "Pg C" "Pg C" "Pg C"],
+          title=["E_planet" "E_ocean" "E_atmos" "T_ocean" "T_atmos" "C_land" "C_ocean" "C_atmos" ])
+plot!(pl,sol_hybrid, layout=(4,2), label="prediction")      
+plot!(pl, size=(750,1000))
