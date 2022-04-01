@@ -1,4 +1,7 @@
 # load packages
+cd("/User/homes/bahrens/minerva_bahrens/projects/ClimateCarbonCycle-Hybrid")
+
+using Pkg; Pkg.activate("."); Pkg.instantiate()
 using Flux
 using Flux.Data: DataLoader
 using CSV
@@ -10,7 +13,7 @@ home = pwd()
 
 
 #%% load data
-df = DataFrame(CSV.File(home*"/data/carbon-budget_MPI-ESM1-2-LR_1pctCO2_1850-2014.csv"))
+df = DataFrame(CSV.File("/Net/Groups/BGI/people/awinkler/CMIP6/03_CarbonCycle-Hybrid/data/carbon-budget_MPI-ESM1-2-LR_1pctCO2_1850-2014.csv"))
 tas_data = df[!, "tas"][2:len+1]
 Cland_data = df[!, "cLand"][2:len+1]
 reco_data = df[!, "reco"][2:len+1]
