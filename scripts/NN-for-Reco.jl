@@ -1,4 +1,7 @@
 # load packages
+cd("/User/homes/bahrens/minerva_bahrens/projects/ClimateCarbonCycle-Hybrid")
+
+using Pkg; Pkg.activate("."); Pkg.instantiate()
 using Flux
 using Flux.Data: DataLoader
 using CSV
@@ -10,7 +13,7 @@ home = pwd()
 
 
 #%% load data
-df = DataFrame(CSV.File(home*"/data/carbon-budget_MPI-ESM1-2-LR_1pctCO2_1850-2014.csv"))
+df = DataFrame(CSV.File("/Net/Groups/BGI/people/awinkler/CMIP6/03_CarbonCycle-Hybrid/data/carbon-budget_MPI-ESM1-2-LR_1pctCO2_1850-2014.csv"))
 tas_data = df[!, "tas"][2:len+1]
 Cland_data = df[!, "cLand"][2:len+1]
 reco_data = df[!, "reco"][2:len+1]
@@ -36,10 +39,10 @@ Ydata = Float32.(reco_data)
 #Xdata = Flux.normalise(Xdata)
 
 Xtest = Xdata'
-Ytest = Ydata
+Ytest = Ydata'
 
 Xtrain = Xdata'
-Ytrain = Ydata
+Ytrain = Ydata'
 
 train_loader = DataLoader((Xtrain, Ytrain), batchsize=n_batch, shuffle=false);
 
@@ -60,24 +63,24 @@ cb = () -> push!(alllosses,loss(Xtest, Ytest))
 #%% define training function
 function my_custom_train!(loss, ps, data, opt)
     # declare training loss local so we can use it outside gradient calculation
-    local training_loss                                                            
+    local training_loss
     ps = Params(ps)
-    print(ps)                                                                
+    print(ps)
     for d in data
       #x = transpose(d[1])
-      #y = transpose(d[2])                                                               
+      #y = transpose(d[2])
       gs = gradient(ps) do
-        print(d)                                                            
+        print(d)
         training_loss = loss(d...)
         return training_loss
-      end  
-      
+      end
+
       #print(ps)
       #print(gs)
-      
-      #Flux.update!(opt, ps, gs)                                                       
-    end                                                                               
-  end 
+
+      #Flux.update!(opt, ps, gs)
+    end
+  end
 
 #%% losses container
 alllosses = []
@@ -87,9 +90,7 @@ for epoch in 1:n_epochs
     @time Flux.train!(loss, ps, train_loader, opt, cb = cb)
 end
 #%% make plot
-scatter(model(Xtest), Ytest)
+scatter(model(Xtest)', Ytest')
 
 #%% plot losses
 plot(alllosses)
-
-
