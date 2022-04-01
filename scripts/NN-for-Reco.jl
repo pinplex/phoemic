@@ -39,10 +39,10 @@ Ydata = Float32.(reco_data)
 #Xdata = Flux.normalise(Xdata)
 
 Xtest = Xdata'
-Ytest = Ydata
+Ytest = Ydata'
 
 Xtrain = Xdata'
-Ytrain = Ydata
+Ytrain = Ydata'
 
 train_loader = DataLoader((Xtrain, Ytrain), batchsize=n_batch, shuffle=false);
 
@@ -63,24 +63,24 @@ cb = () -> push!(alllosses,loss(Xtest, Ytest))
 #%% define training function
 function my_custom_train!(loss, ps, data, opt)
     # declare training loss local so we can use it outside gradient calculation
-    local training_loss                                                            
+    local training_loss
     ps = Params(ps)
-    print(ps)                                                                
+    print(ps)
     for d in data
       #x = transpose(d[1])
-      #y = transpose(d[2])                                                               
+      #y = transpose(d[2])
       gs = gradient(ps) do
-        print(d)                                                            
+        print(d)
         training_loss = loss(d...)
         return training_loss
-      end  
-      
+      end
+
       #print(ps)
       #print(gs)
-      
-      #Flux.update!(opt, ps, gs)                                                       
-    end                                                                               
-  end 
+
+      #Flux.update!(opt, ps, gs)
+    end
+  end
 
 #%% losses container
 alllosses = []
@@ -90,9 +90,7 @@ for epoch in 1:n_epochs
     @time Flux.train!(loss, ps, train_loader, opt, cb = cb)
 end
 #%% make plot
-scatter(model(Xtest), Ytest)
+scatter(model(Xtest)', Ytest')
 
 #%% plot losses
 plot(alllosses)
-
-
